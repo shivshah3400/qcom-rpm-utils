@@ -1,0 +1,28 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+# =============================================================================
+# Release
+# =============================================================================
+# Manually-triggered workflow that builds the package's RPM(s) and publishes
+# them to JFrog Artifactory.
+#
+# See the `main` branch's docs/reusable-workflows.md for the full documentation.
+# =============================================================================
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  release:
+    uses: qualcomm-linux/qcom-rpm-utils/.github/workflows/pkg-release-reusable-workflow.yml@main
+    with:
+      qcom-rpm-utils-ref: main
+      cache-base-url: ${{ vars.SRC_TARBALL_CACHE_BASE_URL }}
+    secrets:
+      QSC_API_KEY: ${{ secrets.QSC_API_KEY }}
+      ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.RPM_ARTIFACTORY_ACCESS_TOKEN }}

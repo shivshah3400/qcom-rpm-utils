@@ -1,0 +1,39 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+# =============================================================================
+# Build on PR
+# =============================================================================
+# Builds the package's RPM(s) on every pull request so reviewers can confirm
+# the spec file still builds before merge.
+#
+# All build logic lives in the shared reusable workflow
+# qualcomm-linux/qcom-rpm-utils/.github/workflows/pkg-build-reusable-workflow.yml,
+# which reads the dist-git `sources` file, resolves each tarball from the
+# lookaside cache, verifies its checksum, and runs `rpmbuild` inside the
+# prebuilt `rpm-builder` container image pulled from GHCR.
+#
+# Required configuration:
+#   vars.SRC_TARBALL_CACHE_BASE_URL - Base URL of the lookaside cache (Actions variable).
+#
+# =============================================================================
+name: Build on PR
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+
+permissions:
+  contents: read
+  packages: read
+
+# Prevent overlapping runs for the same PR; cancel superseded runs.
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: qualcomm-linux/qcom-rpm-utils/.github/workflows/pkg-build-reusable-workflow.yml@main
+    with:
+      qcom-rpm-utils-ref: main
