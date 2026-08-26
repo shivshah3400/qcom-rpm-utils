@@ -41,7 +41,7 @@ import urllib.error
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("create_data_tar")
 
-DEFAULT_BASE_IMAGE = "quay.io/centos/centos:stream10"
+DEFAULT_BUILDER_IMAGE = "ghcr.io/qualcomm-linux/rpm-builder:centos10"
 ARTIFACTORY_SEARCH_API = "https://qartifactory-edge.qualcomm.com/artifactory/api/search/artifact"
 DOC_DIR_NAMES = ("usr/share/doc", "usr/share/man")
 
@@ -79,7 +79,7 @@ def parse_arguments():
         "--docker-image",
         required=False,
         default="",
-        help=f"Docker image to use when running inside a container. Defaults to {DEFAULT_BASE_IMAGE}."
+        help=f"Docker image to use when running inside a container. Defaults to {DEFAULT_BUILDER_IMAGE}."
     )
     parser.add_argument("--_in-docker", dest="in_docker", action="store_true",
                         default=False, help=argparse.SUPPRESS)
@@ -103,7 +103,7 @@ def rerun_in_docker(args, srpm_path: str) -> int:
 
     Returns the container's exit code.
     """
-    image_name = args.docker_image if args.docker_image else DEFAULT_BASE_IMAGE
+    image_name = args.docker_image if args.docker_image else DEFAULT_BUILDER_IMAGE
 
     script_dir      = os.path.dirname(os.path.abspath(__file__))
     work_dir        = os.path.dirname(srpm_path)
