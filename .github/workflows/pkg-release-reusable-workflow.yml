@@ -31,14 +31,23 @@ on:
         required: false
         default: ""
       cache-base-url:
-        description: "Base URL of the lookaside cache holding source tarballs"
+        description: >
+          Overrides the lookaside cache URL. Empty (the default) derives it from
+          the resolved target repo, which is what callers should normally use
         type: string
-        required: true
+        required: false
+        default: ""
       cache-path-template:
         description: "Lookaside path template appended to cache-base-url"
         type: string
         required: false
         default: "{filename}/{hashtype}/{hash}/{filename}"
+      publish-target:
+        description: >
+          Artifactory environment to publish to: "staging" (default) or "prod".
+        type: string
+        required: false
+        default: "staging"
       server-url:
         description: "Artifactory server URL"
         type: string
@@ -46,10 +55,11 @@ on:
         default: "https://qartifactory.pe.jfrog.io"
       target-repo:
         description: >
-          Artifactory YUM/RPM repo to publish to.
+          Overrides the repo derived from publish-target. Empty (the default)
+          derives it, which is what callers should normally use.
         type: string
         required: false
-        default: "qsc-rpm-releases-stage"
+        default: ""
       distro:
         description: "Distribution name; first path segment under target-repo"
         type: string
@@ -67,10 +77,16 @@ on:
         default: "os"
     secrets:
       QSC_API_KEY:
-        description: "QSC API key used to obtain an Artifactory access token. Takes precedence over ARTIFACTORY_ACCESS_TOKEN when both are set."
+        description: "Staging QSC API key. Takes precedence over ARTIFACTORY_ACCESS_TOKEN when both are set."
         required: false
       ARTIFACTORY_ACCESS_TOKEN:
-        description: "Pre-generated Artifactory access token. Used when QSC_API_KEY is not set."
+        description: "Staging Artifactory access token. Used when QSC_API_KEY is not set."
+        required: false
+      PROD_QSC_API_KEY:
+        description: "Prod QSC API key. Used only when publish-target is 'prod'. Takes precedence over PROD_ARTIFACTORY_ACCESS_TOKEN."
+        required: false
+      PROD_ARTIFACTORY_ACCESS_TOKEN:
+        description: "Prod Artifactory access token. Used only when publish-target is 'prod', when PROD_QSC_API_KEY is not set."
         required: false
 
 permissions:
@@ -78,8 +94,52 @@ permissions:
   packages: read
 
 jobs:
+  preflight:
+    name: Validate release target
+    runs-on: [self-hosted, platform-prd-u2404-arm64-large-od-ephem]
+    steps:
+      - name: Check publish target and credentials
+        env:
+          PUBLISH_TARGET: ${{ inputs.publish-target }}
+          QSC_API_KEY: ${{ secrets.QSC_API_KEY }}
+          ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+          PROD_QSC_API_KEY: ${{ secrets.PROD_QSC_API_KEY }}
+          PROD_ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.PROD_ARTIFACTORY_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          case "${PUBLISH_TARGET}" in
+            staging)
+              api_key="${QSC_API_KEY}"
+              token="${ARTIFACTORY_ACCESS_TOKEN}"
+              api_name="QSC_API_KEY"
+              token_name="ARTIFACTORY_ACCESS_TOKEN"
+              ;;
+            prod)
+              api_key="${PROD_QSC_API_KEY}"
+              token="${PROD_ARTIFACTORY_ACCESS_TOKEN}"
+              api_name="PROD_QSC_API_KEY"
+              token_name="PROD_ARTIFACTORY_ACCESS_TOKEN"
+              ;;
+            *)
+              echo "::error::Unknown publish-target '${PUBLISH_TARGET}'. Use 'staging' or 'prod'."
+              exit 1
+              ;;
+          esac
+
+          if [[ -n "${api_key}" ]]; then
+            echo "Publishing to ${PUBLISH_TARGET} using ${api_name}."
+          elif [[ -n "${token}" ]]; then
+            echo "Publishing to ${PUBLISH_TARGET} using ${token_name}."
+          else
+            echo "::error::No credential for publish-target '${PUBLISH_TARGET}'." \
+                 "Set either ${api_name} or ${token_name} on this repository."
+            exit 1
+          fi
+
   build:
     name: Build
+    needs: preflight
     uses: ./.github/workflows/pkg-build-reusable-workflow.yml
     with:
       qcom-rpm-utils-ref: ${{ inputs.qcom-rpm-utils-ref }}
@@ -88,34 +148,42 @@ jobs:
       release: true
       cache-base-url: ${{ inputs.cache-base-url }}
       cache-path-template: ${{ inputs.cache-path-template }}
+      publish-target: ${{ inputs.publish-target }}
       target-repo: ${{ inputs.target-repo }}
       server-url: ${{ inputs.server-url }}
+      distro: ${{ inputs.distro }}
+      distro-version: ${{ inputs.distro-version }}
+      channel: ${{ inputs.channel }}
     secrets:
       QSC_API_KEY: ${{ secrets.QSC_API_KEY }}
       ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+      PROD_QSC_API_KEY: ${{ secrets.PROD_QSC_API_KEY }}
+      PROD_ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.PROD_ARTIFACTORY_ACCESS_TOKEN }}
 
-  publish:
-    name: Publish to Artifactory
+  approve-prod:
+    name: Approve prod publish
     needs: build
+    if: ${{ inputs.publish-target == 'prod' }}
     runs-on: [self-hosted, platform-prd-u2404-arm64-large-od-ephem]
     environment: pkg-release-approval
     steps:
-      - name: Verify a publish credential is configured
+      - name: Approved
         env:
-          QSC_API_KEY: ${{ secrets.QSC_API_KEY }}
-          ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+          TARGET_REPO: ${{ needs.build.outputs.target-repo }}
+          PKG_NAME: ${{ needs.build.outputs.pkg-name }}
+          PKG_VERSION: ${{ needs.build.outputs.pkg-version }}
         run: |
-          set -euo pipefail
-          if [[ -n "${QSC_API_KEY}" ]]; then
-            echo "Publish credential: QSC_API_KEY (an Artifactory token will be minted on demand)."
-          elif [[ -n "${ARTIFACTORY_ACCESS_TOKEN}" ]]; then
-            echo "Publish credential: ARTIFACTORY_ACCESS_TOKEN (pre-generated)."
-          else
-            echo "::error::No publish credential. Set either the QSC_API_KEY or the" \
-                 "ARTIFACTORY_ACCESS_TOKEN secret" \
-            exit 1
-          fi
+          echo "Approved publishing ${PKG_NAME}-${PKG_VERSION} to ${TARGET_REPO}."
 
+  publish:
+    name: Publish to Artifactory
+    needs: [build, approve-prod]
+    if: >-
+      ${{ always()
+          && needs.build.result == 'success'
+          && (inputs.publish-target != 'prod' || needs.approve-prod.result == 'success') }}
+    runs-on: [self-hosted, platform-prd-u2404-arm64-large-od-ephem]
+    steps:
       - name: Checkout tooling (qcom-rpm-utils)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -159,21 +227,25 @@ jobs:
         uses: ./qcom-rpm-utils/.github/actions/rpm-artifactory-upload
         with:
           server_url: ${{ inputs.server-url }}
-          target_repo: ${{ inputs.target-repo }}
+          target_repo: ${{ needs.build.outputs.target-repo }}
           distro: ${{ inputs.distro }}
           distro_version: ${{ inputs.distro-version }}
           channel: ${{ inputs.channel }}
           rpm_dir: output
           provenance_info: ${{ steps.prov.outputs.provenance }}
+          publish_target: ${{ inputs.publish-target }}
           qsc_api_key: ${{ secrets.QSC_API_KEY }}
           access_token: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+          prod_qsc_api_key: ${{ secrets.PROD_QSC_API_KEY }}
+          prod_access_token: ${{ secrets.PROD_ARTIFACTORY_ACCESS_TOKEN }}
 
       - name: Job summary
         if: always()
         env:
           PKG_NAME: ${{ needs.build.outputs.pkg-name }}
           PKG_VERSION: ${{ needs.build.outputs.pkg-version }}
-          TARGET_REPO: ${{ inputs.target-repo }}
+          PUBLISH_TARGET: ${{ inputs.publish-target }}
+          TARGET_REPO: ${{ needs.build.outputs.target-repo }}
           DISTRO: ${{ inputs.distro }}
           DISTRO_VERSION: ${{ inputs.distro-version }}
           CHANNEL: ${{ inputs.channel }}
@@ -183,6 +255,7 @@ jobs:
           {
             echo "## Published RPMs"
             echo ""
+            echo "- Target: \`${PUBLISH_TARGET}\` (\`${TARGET_REPO}\`)"
             echo "- Package: \`${PKG_NAME}-${PKG_VERSION}\`"
             echo "- Binary RPMs: \`${base}/<arch>/Packages/\`"
             echo "- Source RPMs: \`${base}/SRPMS/Packages/\`"

@@ -42,30 +42,63 @@ on:
         required: false
         default: false
       cache-base-url:
-        description: "Base URL of the lookaside cache holding source tarballs"
+        description: >
+          Overrides the lookaside cache URL. Empty (the default) derives it from
+          the resolved target repo, which is what callers should normally use
         type: string
-        required: true
+        required: false
+        default: ""
       cache-path-template:
         description: "Lookaside path template appended to cache-base-url"
         type: string
         required: false
         default: "{filename}/{hashtype}/{hash}/{filename}"
+      publish-target:
+        description: >
+          Selects the target repo, and with it the lookaside cache and default extra-repo
+          URLs. Prod is publicly readable, so builds against it need no token.
+        type: string
+        required: false
+        default: "staging"
       server-url:
         description: "Artifactory server URL used for source cache-back (release only)"
         type: string
         required: false
         default: "https://qartifactory.pe.jfrog.io"
       target-repo:
-        description: "Artifactory repo for source cache-back (release only)"
+        description: >
+          Overrides the repo derived from publish-target. Empty (the default)
+          derives it, which is what callers should normally use.
         type: string
         required: false
-        default: "qsc-rpm-releases-stage"
+        default: ""
+      distro:
+        description: "Distribution name; first path segment under the target repo. Must match the release workflow, or the extra dnf repo points at a tree nothing publishes to."
+        type: string
+        required: false
+        default: "centos"
+      distro-version:
+        description: "Distribution major version"
+        type: string
+        required: false
+        default: "10"
+      channel:
+        description: "Release channel directory (os, nightly)"
+        type: string
+        required: false
+        default: "os"
     secrets:
       QSC_API_KEY:
-        description: "QSC API key for caching source tarballs back to Artifactory (release only). Takes precedence over ARTIFACTORY_ACCESS_TOKEN when both are set."
+        description: "Staging QSC API key for source cache-back (release only). Takes precedence over ARTIFACTORY_ACCESS_TOKEN."
         required: false
       ARTIFACTORY_ACCESS_TOKEN:
-        description: "Pre-generated Artifactory access token for cache-back (release only). Used when QSC_API_KEY is not set."
+        description: "Staging Artifactory access token for source cache-back (release only). Used when QSC_API_KEY is not set."
+        required: false
+      PROD_QSC_API_KEY:
+        description: "Prod QSC API key. Used only when publish-target is 'prod'. Takes precedence over PROD_ARTIFACTORY_ACCESS_TOKEN."
+        required: false
+      PROD_ARTIFACTORY_ACCESS_TOKEN:
+        description: "Prod Artifactory access token. Used only when publish-target is 'prod', when PROD_QSC_API_KEY is not set."
         required: false
     outputs:
       artifact-name:
@@ -77,6 +110,9 @@ on:
       pkg-version:
         description: "Package version resolved from the spec"
         value: ${{ jobs.build.outputs.pkg-version }}
+      target-repo:
+        description: "Artifactory repo resolved from publish-target, for the caller's publish step"
+        value: ${{ jobs.build.outputs.target-repo }}
 
 permissions:
   contents: read
@@ -86,9 +122,8 @@ env:
   BUILD_ID: ${{ github.run_id }}-${{ github.run_attempt }}
   S3_BUCKET: "qli-prd-platform-gh-artifacts"
   FILESERVER_URL: "https://qli-prod-artifacts.qualcomm.com"
-  DEFAULT_CACHE_BASE_URL: "https://qartifactory.pe.jfrog.io/artifactory/qsc-rpm-releases-stage/sources"
-  # $basearch is expanded by dnf inside the container.
-  DEFAULT_EXTRA_REPO: "https://qartifactory.pe.jfrog.io/artifactory/qsc-rpm-releases-stage/centos/10/os/$basearch"
+  STAGING_REPO: "qsc-rpm-releases-stage"
+  PROD_REPO: "qsc-rpm-releases"
 
 jobs:
   build:
@@ -98,7 +133,46 @@ jobs:
       artifact-name: ${{ steps.meta.outputs.artifact-name }}
       pkg-name: ${{ steps.meta.outputs.pkg-name }}
       pkg-version: ${{ steps.meta.outputs.pkg-version }}
+      target-repo: ${{ steps.target.outputs.target_repo }}
     steps:
+      - name: Resolve publish target
+        id: target
+        env:
+          PUBLISH_TARGET: ${{ inputs.publish-target }}
+          TARGET_REPO_INPUT: ${{ inputs.target-repo }}
+          SERVER_URL: ${{ inputs.server-url }}
+          DISTRO: ${{ inputs.distro }}
+          DISTRO_VERSION: ${{ inputs.distro-version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+
+          case "${PUBLISH_TARGET}" in
+            staging) target_repo="${STAGING_REPO}" ;;
+            prod)    target_repo="${PROD_REPO}" ;;
+            *)
+              echo "::error::Unknown publish-target '${PUBLISH_TARGET}'. Use 'staging' or 'prod'."
+              exit 1
+              ;;
+          esac
+
+          if [[ -n "${TARGET_REPO_INPUT}" ]]; then
+            echo "target-repo override in effect: ${TARGET_REPO_INPUT} (publish-target=${PUBLISH_TARGET})"
+            target_repo="${TARGET_REPO_INPUT}"
+          fi
+
+          artifactory_base="${SERVER_URL%/}/artifactory"
+          tree="${DISTRO}/${DISTRO_VERSION}/${CHANNEL}"
+          {
+            echo "target_repo=${target_repo}"
+            echo "cache_base_url=${artifactory_base}/${target_repo}/sources"
+            echo "extra_repo=${artifactory_base}/${target_repo}/${tree}/\$basearch"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "publish-target : ${PUBLISH_TARGET}"
+          echo "target repo    : ${target_repo}"
+          echo "tree           : ${tree}"
+
       - name: Checkout package repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -146,6 +220,8 @@ jobs:
           CACHE_PATH_TEMPLATE: ${{ inputs.cache-path-template }}
           SPEC_FILE: ${{ steps.spec.outputs.spec }}
           IS_RELEASE: ${{ inputs.release }}
+          DEFAULT_CACHE_BASE_URL: ${{ steps.target.outputs.cache_base_url }}
+          TARGET_REPO: ${{ steps.target.outputs.target_repo }}
         run: |
           set -euo pipefail
           if [[ ! -f sources ]]; then
@@ -153,8 +229,13 @@ jobs:
             exit 1
           fi
           if [[ -z "${CACHE_BASE_URL}" ]]; then
-            echo "::warning::cache-base-url input is empty. Falling back to default: ${DEFAULT_CACHE_BASE_URL}"
             CACHE_BASE_URL="${DEFAULT_CACHE_BASE_URL}"
+            echo "cache-base-url derived from the target repo: ${CACHE_BASE_URL}"
+          elif [[ "${CACHE_BASE_URL}" != *"/${TARGET_REPO}/"* ]]; then
+            echo "::warning::cache-base-url (${CACHE_BASE_URL}) does not reference the" \
+                 "target repo '${TARGET_REPO}'. Cache reads will not match where sources" \
+                 "are cached back, so every lookup will miss. Leave cache-base-url empty" \
+                 "to derive it as ${DEFAULT_CACHE_BASE_URL}"
           fi
           emit=""
           if [[ "${IS_RELEASE}" == "true" ]]; then
@@ -173,11 +254,14 @@ jobs:
         uses: ./qcom-rpm-utils/.github/actions/rpm-artifactory-upload
         with:
           server_url: ${{ inputs.server-url }}
-          target_repo: ${{ inputs.target-repo }}
+          target_repo: ${{ steps.target.outputs.target_repo }}
           rpm_dir: pkg/sources-cache
           cache_uploads_manifest: pkg/sources-cache/.cache-uploads
+          publish_target: ${{ inputs.publish-target }}
           qsc_api_key: ${{ secrets.QSC_API_KEY }}
           access_token: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+          prod_qsc_api_key: ${{ secrets.PROD_QSC_API_KEY }}
+          prod_access_token: ${{ secrets.PROD_ARTIFACTORY_ACCESS_TOKEN }}
 
       - name: Log in to GHCR (pull rpm-builder image)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
@@ -195,6 +279,8 @@ jobs:
           SPEC_FILE: ${{ steps.spec.outputs.spec }}
           EXTRA_REPO: ${{ inputs.extra-repo }}
           ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.ARTIFACTORY_ACCESS_TOKEN }}
+          DEFAULT_EXTRA_REPO: ${{ steps.target.outputs.extra_repo }}
+          PUBLISH_TARGET: ${{ inputs.publish-target }}
         run: |
           set -euo pipefail
           chmod +x ../qcom-rpm-utils/scripts/build-rpm.sh
@@ -208,7 +294,10 @@ jobs:
                 --output ./output
                 --builder-image "${builder_image}")
           if [[ -z "${EXTRA_REPO}" ]]; then
-            if [[ -n "${ARTIFACTORY_ACCESS_TOKEN}" ]]; then
+            if [[ "${PUBLISH_TARGET}" == "prod" ]]; then
+              echo "::warning::extra-repo input is empty. Falling back to default: ${DEFAULT_EXTRA_REPO}"
+              EXTRA_REPO="${DEFAULT_EXTRA_REPO}"
+            elif [[ -n "${ARTIFACTORY_ACCESS_TOKEN}" ]]; then
               echo "::warning::extra-repo input is empty. Falling back to default: ${DEFAULT_EXTRA_REPO}"
               EXTRA_REPO="https://:${ARTIFACTORY_ACCESS_TOKEN}@${DEFAULT_EXTRA_REPO#https://}"
             else
