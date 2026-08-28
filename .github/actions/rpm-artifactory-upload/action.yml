@@ -49,12 +49,26 @@ inputs:
     required: false
     default: "{}"
 
+  publish_target:
+    description: >
+      Which credential pair to use: "staging" (default) or "prod".
+    required: false
+    default: "staging"
+
   access_token:
-    description: "Pre-generated Artifactory access token. Used directly when qsc_api_key is not set, and as a fallback if the qsc_api_key exchange fails."
+    description: "Staging Artifactory access token. Used when qsc_api_key is not set, and as a fallback if the qsc_api_key exchange fails."
     required: false
 
   qsc_api_key:
-    description: "QSC API key. When set, it is exchanged for a temporary Artifactory access token (takes precedence over access_token)."
+    description: "Staging QSC API key. When set, it is exchanged for a temporary Artifactory access token (takes precedence over access_token)."
+    required: false
+
+  prod_access_token:
+    description: "Prod Artifactory access token. Used when publish_target is 'prod' and prod_qsc_api_key is not set."
+    required: false
+
+  prod_qsc_api_key:
+    description: "Prod QSC API key. Used when publish_target is 'prod'; takes precedence over prod_access_token."
     required: false
 
   access_token_url:
@@ -113,15 +127,39 @@ runs:
       shell: bash
       env:
         ACCESS_TOKEN_URL: ${{ inputs.access_token_url }}
+        PUBLISH_TARGET: ${{ inputs.publish_target }}
         QSC_API_KEY: ${{ inputs.qsc_api_key }}
         ACCESS_TOKEN: ${{ inputs.access_token }}
+        PROD_QSC_API_KEY: ${{ inputs.prod_qsc_api_key }}
+        PROD_ACCESS_TOKEN: ${{ inputs.prod_access_token }}
         ACCESS_TOKEN_DATA: ${{ inputs.access_token_data }}
       run: |
         set -euo pipefail
 
-        if [ -z "$QSC_API_KEY" ] && [ -z "$ACCESS_TOKEN" ]; then
-          echo "::error::Neither qsc_api_key nor access_token provided. Set the" \
-               "QSC_API_KEY or ARTIFACTORY_ACCESS_TOKEN secret on the calling repo." >&2
+        case "${PUBLISH_TARGET}" in
+          staging)
+            qsc_key="${QSC_API_KEY}"
+            token="${ACCESS_TOKEN}"
+            qsc_name="qsc_api_key"
+            token_name="access_token"
+            ;;
+          prod)
+            qsc_key="${PROD_QSC_API_KEY}"
+            token="${PROD_ACCESS_TOKEN}"
+            qsc_name="prod_qsc_api_key"
+            token_name="prod_access_token"
+            ;;
+          *)
+            echo "::error::Unknown publish_target '${PUBLISH_TARGET}'. Use 'staging' or 'prod'."
+            exit 1
+            ;;
+        esac
+
+        echo "Credential set: ${PUBLISH_TARGET}"
+
+        if [ -z "$qsc_key" ] && [ -z "$token" ]; then
+          echo "::error::Neither ${qsc_name} nor ${token_name} is set, which are the" \
+               "credentials for publish_target '${PUBLISH_TARGET}'." >&2
           exit 1
         fi
 
@@ -130,18 +168,16 @@ runs:
           echo "access_token=$1" >> "$GITHUB_OUTPUT"
         }
 
-        # QSC key takes precedence: exchange it for a temporary token. When it
-        # is absent, fall back to the pre-generated access_token as-is.
-        if [ -z "$QSC_API_KEY" ]; then
-          echo "No qsc_api_key provided; using the pre-generated access_token."
-          emit_token "$ACCESS_TOKEN"
+        if [ -z "$qsc_key" ]; then
+          echo "No ${qsc_name} provided; using ${token_name}."
+          emit_token "$token"
           exit 0
         fi
 
-        echo "Generating access token using qsc_api_key..."
-        if [ -n "$ACCESS_TOKEN" ]; then
-          echo "Note: both credentials are set; qsc_api_key takes precedence." \
-               "The access_token is kept only as a fallback."
+        echo "Generating access token using ${qsc_name}..."
+        if [ -n "$token" ]; then
+          echo "Note: both credentials are set; ${qsc_name} takes precedence." \
+               "${token_name} is kept only as a fallback."
         fi
 
         http_code=""
@@ -152,7 +188,7 @@ runs:
           -X POST "$ACCESS_TOKEN_URL" \
           -H 'Content-Type: application/json' \
           -H 'X-QCOM-TokenType: apikey' \
-          -H "Authorization: $QSC_API_KEY" \
+          -H "Authorization: $qsc_key" \
           -d "$ACCESS_TOKEN_DATA"); then
           http_code="${response##*$'\n'}"
           body="${response%$'\n'*}"
@@ -164,24 +200,22 @@ runs:
           echo "Token endpoint request failed (curl exit $?)."
         fi
 
-        token="$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null || true)"
+        token_from_api="$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null || true)"
 
-        if [ -n "$token" ]; then
-          emit_token "$token"
+        if [ -n "$token_from_api" ]; then
+          emit_token "$token_from_api"
           echo "Access token generated successfully."
           exit 0
         fi
 
-        # Exchange failed. Fall back to the pre-generated token when one exists,
-        # so a misconfigured or not-yet-live QSC key cannot block a release.
-        if [ -n "$ACCESS_TOKEN" ]; then
-          echo "::warning::Could not obtain a token from qsc_api_key (HTTP ${http_code:-n/a})." \
-               "Falling back to the pre-generated access_token."
-          emit_token "$ACCESS_TOKEN"
+        if [ -n "$token" ]; then
+          echo "::warning::Could not obtain a token from ${qsc_name} (HTTP ${http_code:-n/a})." \
+               "Falling back to ${token_name}."
+          emit_token "$token"
           exit 0
         fi
 
-        echo "::error::Failed to generate an access token from qsc_api_key"
+        echo "::error::Failed to generate an access token from ${qsc_name}"
         echo "HTTP status: ${http_code:-n/a}"
         exit 1
 
@@ -202,7 +236,8 @@ runs:
         echo "JFrog CLI configured with server ID: $SERVER_ID"
         echo "Server URL: $SERVER_URL"
 
-    - name: Upload RPMs with architecture detection
+    - name: Resolve upload targets and block duplicate versions
+      id: targets
       shell: bash
       env:
         SERVER_ID: "artifactory-server"
@@ -211,10 +246,12 @@ runs:
         DISTRO_VERSION: ${{ inputs.distro_version }}
         CHANNEL: ${{ inputs.channel }}
         RPM_DIR: ${{ inputs.rpm_dir }}
-        PROVENANCE_INFO: ${{ inputs.provenance_info }}
         MANIFEST: ${{ inputs.cache_uploads_manifest }}
       run: |
         set -euo pipefail
+        TARGETS="${RUNNER_TEMP}/rpm-upload-targets.tsv"
+        : > "$TARGETS"
+        echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
 
         shopt -s nullglob
         rpms=()
@@ -227,15 +264,9 @@ runs:
             echo "No RPMs in '$RPM_DIR'; skipping RPM upload (cache-back only)."
             exit 0
           fi
-          echo "ERROR: no *.rpm files found in '$RPM_DIR'" >&2
+          echo "::error::no *.rpm files found in '$RPM_DIR'"
           exit 1
         fi
-
-        PROPS=""
-        for key in $(echo "$PROVENANCE_INFO" | jq -r 'keys[]'); do
-          val=$(echo "$PROVENANCE_INFO" | jq -r --arg k "$key" '.[$k]')
-          PROPS="${PROPS:+${PROPS};}${key}=${val}"
-        done
 
         BASE_DIR="${TARGET_REPO}/${DISTRO}/${DISTRO_VERSION}/${CHANNEL}"
         echo "Upload base: $BASE_DIR"
@@ -249,7 +280,65 @@ runs:
             arch_dir="SRPMS"
           fi
 
-          target_dir="${BASE_DIR}/${arch_dir}/Packages/"
+          printf '%s\t%s\t%s\n' "$f" "${BASE_DIR}/${arch_dir}/Packages/" "$arch" >> "$TARGETS"
+        done
+
+        conflicts=()
+        while IFS=$'\t' read -r f target_dir arch; do
+          base="$(basename "$f")"
+          err="$(mktemp)"
+          if ! raw="$(jf rt search --server-id="$SERVER_ID" "${target_dir}${base}" 2>"$err")"; then
+            echo "::error::Artifactory search failed for ${target_dir}${base}; cannot verify whether it already exists."
+            sed 's/^/    /' "$err"
+            rm -f "$err"
+            exit 1
+          fi
+          rm -f "$err"
+
+          if ! hits="$(printf '%s' "$raw" | jq 'length' 2>/dev/null)"; then
+            echo "::error::Could not parse Artifactory search response for ${target_dir}${base}."
+            exit 1
+          fi
+
+          if [ "${hits:-0}" -gt 0 ]; then
+            conflicts+=("${target_dir}${base}")
+          fi
+        done < "$TARGETS"
+
+        if [ "${#conflicts[@]}" -eq 0 ]; then
+          echo "No already-published artifacts found; safe to upload."
+          exit 0
+        fi
+
+        echo "::error::Refusing to overwrite ${#conflicts[@]} already-published artifact(s):"
+        printf '::error::  %s\n' "${conflicts[@]}"
+        echo "::error::Bump the version or release in the spec to publish."
+        exit 1
+
+    - name: Upload RPMs with architecture detection
+      shell: bash
+      env:
+        SERVER_ID: "artifactory-server"
+        RPM_DIR: ${{ inputs.rpm_dir }}
+        PROVENANCE_INFO: ${{ inputs.provenance_info }}
+        MANIFEST: ${{ inputs.cache_uploads_manifest }}
+        TARGETS: ${{ steps.targets.outputs.targets }}
+      run: |
+        set -euo pipefail
+
+        if [ ! -s "$TARGETS" ]; then
+          echo "No RPMs to upload (cache-back only)."
+          exit 0
+        fi
+
+        PROPS=""
+        for key in $(echo "$PROVENANCE_INFO" | jq -r 'keys[]'); do
+          val=$(echo "$PROVENANCE_INFO" | jq -r --arg k "$key" '.[$k]')
+          PROPS="${PROPS:+${PROPS};}${key}=${val}"
+        done
+
+        while IFS=$'\t' read -r f target_dir arch; do
+          base="$(basename "$f")"
           fileprops="${PROPS:+${PROPS};}rpm.arch=${arch}"
 
           echo "Uploading $base (arch=${arch}) -> $target_dir"
@@ -259,7 +348,7 @@ runs:
             --target-props "${fileprops}" \
             "$f" \
             "$target_dir"
-        done
+        done < "$TARGETS"
 
     - name: Cache back source tarballs
       if: ${{ inputs.cache_uploads_manifest != '' }}
