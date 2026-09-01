@@ -1,0 +1,31 @@
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+# =============================================================================
+# Reusable test workflow
+# =============================================================================
+# Test gates that run once a package has been built. Called by
+# pkg-build-reusable-workflow.yml, so every caller that builds changes - PR
+# builds and releases alike - runs these checks, and a failure here fails the
+# build workflow that called it.
+#
+# The AXIOM check is held by the `Axiom` GitHub environment: its required
+# reviewers are the gate. The environment must exist and have reviewers
+# configured, otherwise the job resolves with no protection rules and passes
+# unconditionally.
+# =============================================================================
+name: Test
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  AXIOM_Check:
+    name: AXIOM Check
+    runs-on: [self-hosted, platform-prd-u2404-arm64-large-od-ephem]
+    environment: Axiom
+    steps:
+      - name: AXIOM check passed
+        run: echo "AXIOM check passed"

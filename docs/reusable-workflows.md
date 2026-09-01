@@ -23,6 +23,7 @@ These workflows turn that into built (and, on release, published) RPMs.
 | [`.github/actions/rpm-artifactory-upload`](../.github/actions/rpm-artifactory-upload/action.yml) | Composite action that uploads RPMs (and source tarballs) to JFrog Artifactory. |
 | [`.github/workflows/pkg-build-reusable-workflow.yml`](../.github/workflows/pkg-build-reusable-workflow.yml) | `workflow_call` build workflow. |
 | [`.github/workflows/pkg-release-reusable-workflow.yml`](../.github/workflows/pkg-release-reusable-workflow.yml) | `workflow_call` release (build + publish) workflow. |
+| [`.github/workflows/test.yml`](../.github/workflows/test.yml) | `workflow_call` test gates, called by the build workflow once a package is built. |
 
 ## The `sources` / lookaside cache model
 
@@ -75,6 +76,35 @@ jobs:
     with:
       qcom-rpm-utils-ref: main
 ```
+
+## `test.yml` — the AXIOM gate
+
+Once the build job succeeds, the build workflow calls
+[`test.yml`](../.github/workflows/test.yml) to run the test gates. Because
+*every* path that builds a package goes through the build workflow — PR builds
+call it directly, and the release workflow builds by calling it — the gate
+applies to PR builds and releases alike from this one place.
+
+The gate is off unless the `AXIOM_ENABLE` Actions **variable** is `true`. When
+it is unset the `test` job is skipped, `test.yml` is never invoked.
+
+What actually holds a run is the **`Axiom` environment**: its required reviewers
+are the gate, so AXIOM signals a pass by approving the deployment. Two things
+follow from that:
+
+- `AXIOM_ENABLE` must be repo level, a
+  job's `if:` is evaluated before its environment is resolved.
+- If `AXIOM_ENABLE` is `true` but no `Axiom` environment exists, the job runs
+  with no protection rules and passes unconditionally. The variable only decides
+  whether the check *exists*; the environment is what makes it a gate. Configure
+  both together.
+
+A failing check fails the build workflow, which fails the release workflow's
+`build` job, so `publish` is blocked for staging and prod alike.
+
+Nested reusable workflows are prefixed by the calling job's name, so the check
+reports as `Test / AXIOM Check` rather than a bare `AXIOM Check` — worth
+knowing when referencing it in branch protection.
 
 ## `pkg-release-reusable-workflow.yml`
 
@@ -202,6 +232,8 @@ overwrite guard has to be able to query what is already published.
 | `PROD_ARTIFACTORY_ACCESS_TOKEN` | Actions **secret** | Prod access token. Only needed by repos that publish to prod. |
 | `PROD_QSC_API_KEY` | Actions **secret** | Prod QSC API key; takes precedence over `PROD_ARTIFACTORY_ACCESS_TOKEN` when set. |
 | `pkg-release-approval` | Environment | Approval gate for **prod** publishes only. Add required reviewers, or the gate is a no-op. Staging needs no environment. |
+| `AXIOM_ENABLE` | Actions **variable** | `true` to require the AXIOM check before publishing. Unset skips it. Must be repo- or org-level, **not** environment-level. |
+| `Axiom` | Environment | Holds the AXIOM check. Only needed when `AXIOM_ENABLE` is `true`; add required reviewers, or the check passes unconditionally. |
 
 
 Each target repo also needs `yumRootDepth: 4` on the Artifactory side.
