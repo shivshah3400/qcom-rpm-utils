@@ -12,8 +12,8 @@ Standalone utility to:
   .src.rpm's version-release (its subpackages)
 - Extract each binary rpm's raw payload into a shared staging directory
 - Pack the staged content as <pkg>-<version>_<release>.<arch>.tar.gz, with
-  the tarball's top-level entries matching the rpms' real paths (e.g.
-  usr/..., etc/...)
+  all content nested under a single top-level <pkg>-<version>/ directory
+  (e.g. <pkg>-<version>/usr/..., <pkg>-<version>/etc/...)
 - Place the tarball under <output-tar>/prebuilt_<distro>/ when --output-tar
   and --distro are provided; otherwise follow the fallback rules described
   in --output-tar help.
@@ -284,11 +284,12 @@ def gather_notice_and_license(stage_dir: str) -> None:
             logger.warning(f"No {filename} found in the extracted rpm payload; skipping.")
 
 
-def create_tar_of_stage(stage_dir: str, tar_path: str) -> str:
+def create_tar_of_stage(stage_dir: str, tar_path: str, top_dir: str) -> str:
     """
-    Create tarball at tar_path containing the staged rpm content, with each
-    top-level entry of stage_dir added at the tar root (so the archive
-    mirrors the rpms' real filesystem layout, e.g. usr/..., etc/...).
+    Create tarball at tar_path containing the staged rpm content, nested
+    under a single top-level directory (top_dir), e.g.
+    <top_dir>/usr/..., <top_dir>/etc/..., mirroring the rpms' real
+    filesystem layout beneath that directory.
     Returns the path to the tarball on success.
     """
     if not os.path.isdir(stage_dir):
@@ -297,7 +298,7 @@ def create_tar_of_stage(stage_dir: str, tar_path: str) -> str:
     os.makedirs(os.path.dirname(tar_path) or '.', exist_ok=True)
     with tarfile.open(tar_path, 'w:gz') as tar:
         for entry in sorted(os.listdir(stage_dir)):
-            tar.add(os.path.join(stage_dir, entry), arcname=entry)
+            tar.add(os.path.join(stage_dir, entry), arcname=os.path.join(top_dir, entry))
     return tar_path
 
 
@@ -461,7 +462,8 @@ def main():
         else:
             dest_dir = os.path.join(work_dir, f'prebuilt_{args.distro}') if args.distro else work_dir
             tar_path = os.path.join(dest_dir, tar_name)
-        tar_path = create_tar_of_stage(stage_dir, tar_path)
+        top_dir = f"{name}-{version}"
+        tar_path = create_tar_of_stage(stage_dir, tar_path, top_dir)
         logger.info(f"Created tarball: {tar_path}")
     except Exception as e:
         logger.critical(f"Failed to create tarball: {e}")
