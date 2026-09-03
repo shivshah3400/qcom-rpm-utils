@@ -12,6 +12,14 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      publish-target:
+        description: "Artifactory environment to publish to"
+        type: choice
+        options:
+          - staging
+          - prod
+        default: staging
 
 permissions:
   contents: read
@@ -22,7 +30,9 @@ jobs:
     uses: qualcomm-linux/qcom-rpm-utils/.github/workflows/pkg-release-reusable-workflow.yml@main
     with:
       qcom-rpm-utils-ref: main
-      cache-base-url: ${{ vars.SRC_TARBALL_CACHE_BASE_URL }}
+      publish-target: ${{ inputs.publish-target }}
     secrets:
       QSC_API_KEY: ${{ secrets.QSC_API_KEY }}
       ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.RPM_ARTIFACTORY_ACCESS_TOKEN }}
+      PROD_QSC_API_KEY: ${{ secrets.PROD_QSC_API_KEY }}
+      PROD_ARTIFACTORY_ACCESS_TOKEN: ${{ secrets.PROD_RPM_ARTIFACTORY_ACCESS_TOKEN }}

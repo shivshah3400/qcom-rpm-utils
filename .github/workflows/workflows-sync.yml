@@ -28,16 +28,12 @@ on:
         description: |
           Tick to confirm creating pull requests to sync workflows from
           qcom-rpm-utils to the pkg-rpm-* packaging repositories.
-          If not ticked, the workflow runs in dry-run mode: it prints the
-          repositories that would be synced without creating any pull requests.
       repos:
         type: string
         required: false
         default: ""
         description: |
-          Optional comma- or space-separated list of repositories to sync, e.g.
-          "pkg-rpm-bluez, pkg-rpm-time-services". Leave empty to sync every
-          pkg-rpm-* repository in the organization.
+          Optional comma- or space-separated list of repositories to sync.
 
 permissions:
   contents: write
@@ -63,6 +59,7 @@ jobs:
           private-key: ${{ secrets.RPM_PKG_BOT_CI_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
           owner: qualcomm-linux
 
       - name: Sync workflows from qcom-rpm-utils
@@ -72,7 +69,6 @@ jobs:
           ORG: qualcomm-linux
           BOT_NAME: ${{ vars.RPM_PKG_BOT_CI_NAME }}
           BOT_EMAIL: ${{ vars.RPM_PKG_BOT_CI_EMAIL }}
-          BOT_USERNAME: ${{ vars.RPM_PKG_BOT_CI_USERNAME }}
           CONFIRMATION_INPUT: ${{ inputs.confirmation }}
           REPOS_INPUT: ${{ inputs.repos }}
         run: |
@@ -178,21 +174,6 @@ jobs:
             fi
 
             echo "🔄 Checking repo: $repo"
-
-            # Check whether the bot can write to this repo.
-            echo "  🔍 Checking permissions for $BOT_USERNAME on $repo"
-            permission_response=$(gh api "repos/$ORG/$repo/collaborators/$BOT_USERNAME/permission" 2>/dev/null || echo "")
-            permission_level=$(echo "$permission_response" | jq -r '.permission // empty' 2>/dev/null || true)
-
-            if [[ -n "$permission_level" ]]; then
-              if [[ "$permission_level" != "write" && "$permission_level" != "admin" ]]; then
-                record_warning "$repo: $BOT_USERNAME lacks write/admin permission, skipping"
-                continue
-              fi
-              echo "  ✅ $BOT_USERNAME has $permission_level permissions on $repo"
-            else
-              echo "  ℹ️ No collaborator entry for $BOT_USERNAME; relying on installation scope."
-            fi
 
             # Clone the target repository
             if ! run_cmd gh repo clone "$ORG/$repo" "$repo"; then
